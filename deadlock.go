@@ -21,7 +21,7 @@ var Opts = struct {
 	// Would disable lock order based deadlock detection if DisableLockOrderDetection == true.
 	DisableLockOrderDetection bool
 	// Waiting for a lock for longer than DeadlockTimeout is considered a deadlock.
-	// Ignored if DeadlockTimeout <= 0.
+	// Ignored is DeadlockTimeout <= 0.
 	DeadlockTimeout time.Duration
 	// OnPotentialDeadlock is called each time a potential deadlock is detected -- either based on
 	// lock order or on lock wait time.
@@ -35,7 +35,9 @@ var Opts = struct {
 	// Will print deadlock info to log buffer.
 	LogBuf io.Writer
 }{
-	DeadlockTimeout: time.Second * 30,
+	// We increase this to ten minutes since if we wait that long on a lock it really
+	// is most likely a bug.
+	DeadlockTimeout: time.Minute * 10,
 	OnPotentialDeadlock: func() {
 		os.Exit(2)
 	},
@@ -68,9 +70,6 @@ type Pool struct {
 type WaitGroup struct {
 	sync.WaitGroup
 }
-
-// NewCond is a sync.NewCond wrapper
-var NewCond = sync.NewCond
 
 // A Mutex is a drop-in replacement for sync.Mutex.
 // Performs deadlock detection unless disabled in Opts.
@@ -158,12 +157,12 @@ func (m *RWMutex) RLocker() sync.Locker {
 	return (*rlocker)(m)
 }
 
-func preLock(stack []uintptr, p interface{}) {
-	lo.preLock(stack, p)
+func preLock(skip int, p interface{}) {
+	lo.preLock(skip, p)
 }
 
-func postLock(stack []uintptr, p interface{}) {
-	lo.postLock(stack, p)
+func postLock(skip int, p interface{}) {
+	lo.postLock(skip, p)
 }
 
 func postUnlock(p interface{}) {
@@ -175,13 +174,11 @@ func lock(lockFn func(), ptr interface{}) {
 		lockFn()
 		return
 	}
-	stack := callers(1)
-	preLock(stack, ptr)
+	preLock(4, ptr)
 	if Opts.DeadlockTimeout <= 0 {
 		lockFn()
 	} else {
 		ch := make(chan struct{})
-		currentID := goid.Get()
 		go func() {
 			for {
 				t := time.NewTimer(Opts.DeadlockTimeout)
@@ -200,8 +197,8 @@ func lock(lockFn func(), ptr interface{}) {
 					fmt.Fprintf(Opts.LogBuf, "goroutine %v lock %p\n", prev.gid, ptr)
 					printStack(Opts.LogBuf, prev.stack)
 					fmt.Fprintln(Opts.LogBuf, "Have been trying to lock it again for more than", Opts.DeadlockTimeout)
-					fmt.Fprintf(Opts.LogBuf, "goroutine %v lock %p\n", currentID, ptr)
-					printStack(Opts.LogBuf, stack)
+					fmt.Fprintf(Opts.LogBuf, "goroutine %v lock %p\n", goid.Get(), ptr)
+					printStack(Opts.LogBuf, callers(2))
 					stacks := stacks()
 					grs := bytes.Split(stacks, []byte("\n\n"))
 					for _, g := range grs {
@@ -231,11 +228,11 @@ func lock(lockFn func(), ptr interface{}) {
 			}
 		}()
 		lockFn()
-		postLock(stack, ptr)
+		postLock(4, ptr)
 		close(ch)
 		return
 	}
-	postLock(stack, ptr)
+	postLock(4, ptr)
 }
 
 type lockOrder struct {
@@ -268,17 +265,19 @@ func newLockOrder() *lockOrder {
 	}
 }
 
-func (l *lockOrder) postLock(stack []uintptr, p interface{}) {
+func (l *lockOrder) postLock(skip int, p interface{}) {
+	stack := callers(skip)
 	gid := goid.Get()
 	l.mu.Lock()
 	l.cur[p] = stackGID{stack, gid}
 	l.mu.Unlock()
 }
 
-func (l *lockOrder) preLock(stack []uintptr, p interface{}) {
+func (l *lockOrder) preLock(skip int, p interface{}) {
 	if Opts.DisableLockOrderDetection {
 		return
 	}
+	stack := callers(skip)
 	gid := goid.Get()
 	l.mu.Lock()
 	for b, bs := range l.cur {
