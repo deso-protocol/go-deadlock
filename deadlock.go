@@ -35,7 +35,9 @@ var Opts = struct {
 	// Will print deadlock info to log buffer.
 	LogBuf io.Writer
 }{
-	DeadlockTimeout: time.Second * 30,
+	// We increase this to ten minutes since if we wait that long on a lock it really
+	// is most likely a bug.
+	DeadlockTimeout: time.Minute * 10,
 	OnPotentialDeadlock: func() {
 		os.Exit(2)
 	},
